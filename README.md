@@ -27,7 +27,7 @@ All simulations are implemented in **single-file HTML** format and run fully on 
 
 ├── ship.html          # Ship + wave animation
 
-├── airplane.html      # Bird-style flight animation
+├── air.html      # Bird-style flight animation
 
 └── README.md
 
