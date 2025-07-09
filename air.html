@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <title>フライトシミュレーション with City Lights & 4 Runways (Dark Shadows)</title>
+    <style>
+      body { margin: 0; overflow: hidden; background-color: #000; }
+      canvas { display: block; }
+    </style>
+  </head>
+  <body>
+    <!-- Three.js r128 CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+      // ----- 基本設定 -----
+      function smoothstep(u) { return u * u * (3 - 2 * u); }
+      function easeOut(u) { return 1 - Math.pow(1 - u, 3); }
+      
+      // 各フェーズの時間設定（赤軌道用）
+      const T_taxi = 3, T_takeoff = 15, T_cruise = 40, T_descent = 60, T_landing = 66;
+      // 着陸後の停止時間
+      const T_stop = 5;
+      // 1周期の総時間（飛行＋停止）
+      const cycleDuration = T_landing + T_stop; // 71秒
+      
+      // 青軌道は赤軌道と同じ形状に x 方向オフセットを加えたもの
+      const offsetBlue = new THREE.Vector3(1100, 0, 0);
+      
+      // --- 飛行経路の形状（位置） ---
+      function getPositionShape(t) {
+        let pos = new THREE.Vector3();
+        if (t < 0) t = 0;
+        if (t <= T_taxi) {
+          let u = t / T_taxi;
+          let easedU = u * u;
+          pos.x = 180 + (260 - 180) * easedU;
+          pos.y = 1;
+        } else if (t <= T_takeoff) {
+          let u = (t - T_taxi) / (T_takeoff - T_taxi);
+          pos.x = 260 + (480 - 260) * u;
+          pos.y = 1 + (150 - 1) * smoothstep(u);
+        } else if (t <= T_cruise) {
+          let u = (t - T_takeoff) / (T_cruise - T_takeoff);
+          pos.x = 480 + (900 - 480) * u;
+          pos.y = 150;
+        } else if (t <= T_descent) {
+          let u = (t - T_cruise) / (T_descent - T_cruise);
+          pos.x = 900 + (1210 - 900) * u;
+          pos.y = 150 - (150 - 1) * smoothstep(u);
+        } else {
+          let u = (t - T_descent) / (T_landing - T_descent);
+          pos.x = 1210 + (1280 - 1210) * easeOut(u);
+          pos.y = 1;
+        }
+        pos.z = 0;
+        return pos;
+      }
+      
+      function getCyclePosition(t) {
+        let cycleIndex = Math.floor(t / cycleDuration);
+        let localT = t % cycleDuration;
+        if (localT > T_landing) localT = T_landing;
+        let pos = getPositionShape(localT);
+        if (cycleIndex % 2 === 1) pos.add(offsetBlue);
+        return pos;
+      }
+      
+      function getTangentShape(t) {
+        const dt = 0.01;
+        let pos1 = getPositionShape(t);
+        let pos2 = getPositionShape(t + dt);
+        return new THREE.Vector3().subVectors(pos2, pos1).normalize();
+      }
+      
+      // 常に実際の経路に沿ったタンジェントを返す
+      function getCycleTangent(t) {
+        let localT = t % cycleDuration;
+        return getTangentShape(localT);
+      }
+      
+      // ----- 滑走路の標準化設定 -----
+      const runwayLength = 210;
+      const runwayWidth = 20;
+      function getRunwayCenter(desiredPoint, ratio, runwayLength) {
+        let center = desiredPoint.clone();
+        center.x = desiredPoint.x - (ratio - 0.5) * runwayLength;
+        return center;
+      }
+      
+      // 既存の3つの滑走路の中心
+      const taxiStartRed = getPositionShape(0);
+      const landingRed   = getPositionShape(T_landing);
+      const landingBlue  = getPositionShape(T_landing).clone().add(offsetBlue);
+      
+      const runway1Center = getRunwayCenter(taxiStartRed, 0.5, runwayLength);
+      const runway2Center = getRunwayCenter(landingRed, 0.5, runwayLength);
+      const runway3Center = getRunwayCenter(landingBlue, 0.5, runwayLength);
+      
+      // 4つ目の滑走路：runway2～runway3と同じ間隔で runway3 の先に配置
+      const landingBlue2 = landingBlue.clone().add(offsetBlue);
+      const runway4Center = getRunwayCenter(landingBlue2, 0.5, runwayLength);
+      
+      // ----- シーン、カメラ、レンダラー -----
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x000000);
+      
+      // 遠方の灯りも表示するため、カメラの far を延長
+      const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 10000);
+      camera.position.set(0, 30, 100);
+      
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      document.body.appendChild(renderer.domElement);
+      
+      // ----- 遠方に街の灯りを配置する（THREE.Points を使用） -----
+      // 配置範囲：原点からの距離が 400～6000、y 座標は -0.25 に固定
+      // 各灯りが各滑走路中心（x–z 平面）からの距離が 400 単位未満の場合は除外
+      const cityLightCount = 2000;
+      const positions = [];
+      const runwayCentersXZ = [
+        new THREE.Vector2(runway1Center.x, runway1Center.z),
+        new THREE.Vector2(runway2Center.x, runway2Center.z),
+        new THREE.Vector2(runway3Center.x, runway3Center.z),
+        new THREE.Vector2(runway4Center.x, runway4Center.z)
+      ];
+      const exclusionRadius = 400;
+      while (positions.length < cityLightCount * 3) {
+        const radius = 400 + Math.random() * (6000 - 400);
+        const theta = Math.random() * Math.PI * 2;
+        const x = radius * Math.cos(theta);
+        const z = radius * Math.sin(theta);
+        let valid = true;
+        const candidate = new THREE.Vector2(x, z);
+        for (let center of runwayCentersXZ) {
+          if (candidate.distanceTo(center) < exclusionRadius) {
+            valid = false;
+            break;
+          }
+        }
+        if (valid) {
+          positions.push(x, -0.25, z);
+        }
+      }
+      const cityLightPositions = new Float32Array(positions);
+      const cityLightGeometry = new THREE.BufferGeometry();
+      cityLightGeometry.setAttribute('position', new THREE.BufferAttribute(cityLightPositions, 3));
+      const cityLightMaterial = new THREE.PointsMaterial({ color: 0xffffff, size: 3, sizeAttenuation: true });
+      const cityLights = new THREE.Points(cityLightGeometry, cityLightMaterial);
+      scene.add(cityLights);
+      
+      // ----- ライト（シーン全体用） -----
+      // ※影の濃さを強調するため、アンビエントライトの輝度を 0.8 から 0.4 に下げています
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+      scene.add(ambientLight);
+      
+      // ----- 滑走路の作成 -----
+      // 滑走路の色はより暗いグレー (0x222222) に設定
+      const runwayGeom = new THREE.BoxGeometry(runwayLength, 0.5, runwayWidth);
+      const runwayMat = new THREE.MeshPhongMaterial({ color: 0x222222 });
+      
+      const runway1 = new THREE.Mesh(runwayGeom, runwayMat);
+      runway1.position.set(runway1Center.x, -0.25, runway1Center.z);
+      runway1.receiveShadow = true;
+      scene.add(runway1);
+      
+      const runway2 = new THREE.Mesh(runwayGeom, runwayMat);
+      runway2.position.set(runway2Center.x, -0.25, runway2Center.z);
+      runway2.receiveShadow = true;
+      scene.add(runway2);
+      
+      const runway3 = new THREE.Mesh(runwayGeom, runwayMat);
+      runway3.position.set(runway3Center.x, -0.25, runway3Center.z);
+      runway3.receiveShadow = true;
+      scene.add(runway3);
+      
+      const runway4 = new THREE.Mesh(runwayGeom, runwayMat);
+      runway4.position.set(runway4Center.x, -0.25, runway4Center.z);
+      runway4.receiveShadow = true;
+      scene.add(runway4);
+      
+      // ----- 各滑走路上に光源の設置 -----
+      // 影が消えないよう、シャドウカメラの範囲を拡大
+      function addRunwayLight(runwayCenter) {
+        const light = new THREE.DirectionalLight(0xffffff, 0.5);
+        light.position.set(runwayCenter.x, runwayCenter.y + 100, runwayCenter.z + 50);
+        light.target.position.copy(runwayCenter);
+        light.castShadow = true;
+        light.shadow.camera.left = -500;
+        light.shadow.camera.right = 500;
+        light.shadow.camera.top = 500;
+        light.shadow.camera.bottom = -500;
+        light.shadow.mapSize.width = 2048;
+        light.shadow.mapSize.height = 2048;
+        light.shadow.bias = -0.001;
+        light.shadow.normalBias = 0.05;
+        scene.add(light);
+        scene.add(light.target);
+      }
+      addRunwayLight(runway1Center);
+      addRunwayLight(runway2Center);
+      addRunwayLight(runway3Center);
+      addRunwayLight(runway4Center);
+      
+      // ----- サイドライン（直方体ダッシュ）の実装 -----
+      function addRunwaySideDashedLines(center) {
+        const y = 0;
+        const xStart = center.x - runwayLength / 2;
+        const dashLength = 10;
+        const gap = 5;
+        const dashThickness = 0.5;
+        const dashHeight = 0.05;
+        const dashCount = Math.floor(runwayLength / (dashLength + gap));
+        const material = new THREE.MeshBasicMaterial({ color: 0xffffff });
+        const leftZ  = center.z - runwayWidth / 2 + dashThickness / 2;
+        const rightZ = center.z + runwayWidth / 2 - dashThickness / 2;
+        for (let i = 0; i < dashCount; i++) {
+          let dashX = xStart + i * (dashLength + gap) + dashLength / 2;
+          const dashGeom = new THREE.BoxGeometry(dashLength, dashHeight, dashThickness);
+          const leftDash = new THREE.Mesh(dashGeom, material);
+          leftDash.position.set(dashX, y + dashHeight / 2, leftZ);
+          scene.add(leftDash);
+          const rightDash = new THREE.Mesh(dashGeom, material);
+          rightDash.position.set(dashX, y + dashHeight / 2, rightZ);
+          scene.add(rightDash);
+        }
+      }
+      addRunwaySideDashedLines(runway1Center);
+      addRunwaySideDashedLines(runway2Center);
+      addRunwaySideDashedLines(runway3Center);
+      addRunwaySideDashedLines(runway4Center);
+      
+      // ----- 軌道の可視化 -----
+      const showRedPath = false;
+      const showBluePath = false;
+      const redPathPoints = [];
+      for (let i = 0; i <= 300; i++) {
+        let t = T_landing * i / 300;
+        redPathPoints.push(getPositionShape(t));
+      }
+      const redPathGeom = new THREE.BufferGeometry().setFromPoints(redPathPoints);
+      if (showRedPath) {
+        scene.add(new THREE.Line(redPathGeom, new THREE.LineBasicMaterial({ color: 0xff0000 })));
+      }
+      const bluePathPoints = [];
+      for (let i = 0; i <= 300; i++) {
+        let t = T_landing * i / 300;
+        let pt = getPositionShape(t).clone().add(offsetBlue);
+        bluePathPoints.push(pt);
+      }
+      const bluePathGeom = new THREE.BufferGeometry().setFromPoints(bluePathPoints);
+      if (showBluePath) {
+        scene.add(new THREE.Line(bluePathGeom, new THREE.LineBasicMaterial({ color: 0x0000ff })));
+      }
+      
+      // ----- 飛行機の作成 -----
+      const planeGroup = new THREE.Group();
+      
+      // 胴体
+      const bodyGeom = new THREE.CylinderGeometry(0.5, 0.5, 8, 16);
+      const bodyMat = new THREE.MeshPhongMaterial({ color: 0xffffff });
+      const bodyMesh = new THREE.Mesh(bodyGeom, bodyMat);
+      bodyMesh.rotation.z = Math.PI / 2;
+      bodyMesh.castShadow = true;
+      planeGroup.add(bodyMesh);
+      
+      // 主翼
+      const wingMat = new THREE.MeshPhongMaterial({ color: 0x808080 });
+      const leftWingShape = new THREE.Shape();
+      leftWingShape.moveTo(0, 0);
+      leftWingShape.lineTo(2, 0);
+      leftWingShape.lineTo(0, -6);
+      leftWingShape.lineTo(0, 0);
+      const extrudeSettings = { depth: 0.1, bevelEnabled: false, steps: 1 };
+      let leftWingGeom = new THREE.ExtrudeGeometry(leftWingShape, extrudeSettings);
+      leftWingGeom.rotateX(Math.PI / 2);
+      const leftWingMesh = new THREE.Mesh(leftWingGeom, wingMat);
+      leftWingMesh.position.set(0, 0, -0.5);
+      leftWingMesh.castShadow = true;
+      planeGroup.add(leftWingMesh);
+      
+      const rightWingMesh = leftWingMesh.clone();
+      rightWingMesh.scale.z = -1;
+      rightWingMesh.position.set(0, 0, 0.5);
+      rightWingMesh.castShadow = true;
+      planeGroup.add(rightWingMesh);
+      
+      // 水平尾翼
+      const tailWingShape = new THREE.Shape();
+      tailWingShape.moveTo(0, 0);
+      tailWingShape.lineTo(2/3, 0);
+      tailWingShape.lineTo(0, -2);
+      tailWingShape.lineTo(0, 0);
+      const tailWingGeom = new THREE.ExtrudeGeometry(tailWingShape, extrudeSettings);
+      tailWingGeom.rotateX(Math.PI / 2);
+      const leftTailWingMesh = new THREE.Mesh(tailWingGeom, wingMat);
+      leftTailWingMesh.position.set(0, 0, -0.5);
+      leftTailWingMesh.castShadow = true;
+      const rightTailWingMesh = leftTailWingMesh.clone();
+      rightTailWingMesh.scale.z = -1;
+      rightTailWingMesh.position.set(0, 0, 0.5);
+      rightTailWingMesh.castShadow = true;
+      const tailWingGroup = new THREE.Group();
+      tailWingGroup.add(leftTailWingMesh);
+      tailWingGroup.add(rightTailWingMesh);
+      tailWingGroup.position.set(-3.5, 0, 0);
+      planeGroup.add(tailWingGroup);
+      
+      // 垂直尾翼
+      const verticalTailShape = new THREE.Shape();
+      verticalTailShape.moveTo(0, 0);
+      verticalTailShape.lineTo(-1, 0);
+      verticalTailShape.lineTo(0, 1);
+      verticalTailShape.lineTo(0, 0);
+      const verticalTailGeom = new THREE.ExtrudeGeometry(verticalTailShape, { depth: 0.1, bevelEnabled: false, steps: 1 });
+      const verticalTailMesh = new THREE.Mesh(verticalTailGeom, wingMat);
+      verticalTailMesh.rotation.z = -Math.PI / 2;
+      verticalTailMesh.position.set(-4.0, 0.5, 0);
+      verticalTailMesh.castShadow = true;
+      planeGroup.add(verticalTailMesh);
+      
+      // 初期位置は cycle 0 の t = 0
+      planeGroup.position.copy(getCyclePosition(0));
+      scene.add(planeGroup);
+      
+      // ----- カメラ画角候補と自動切替用設定 -----
+      const cameraAngles = [
+        0,
+        Math.PI / 4,
+        Math.PI / 2,
+        3 * Math.PI / 4,
+        Math.PI, 
+        -3 * Math.PI / 4,
+        -Math.PI / 2,
+        -Math.PI / 4
+      ];
+      let cameraAngleIndex = 0;
+      let cameraAngleCounts = [1, 0, 0, 0, 0, 0, 0, 0];
+      let cameraAngleOffset = cameraAngles[cameraAngleIndex];
+      
+      let autoSwitchTimer = null;
+      function startAutoSwitchTimer() {
+        if (autoSwitchTimer) clearTimeout(autoSwitchTimer);
+        autoSwitchTimer = setTimeout(autoSwitch, 10000);
+      }
+      
+      function autoSwitch() {
+        let minCount = Infinity;
+        for (let i = 0; i < cameraAngles.length; i++) {
+          if (i === cameraAngleIndex) continue;
+          if (cameraAngleCounts[i] < minCount) {
+            minCount = cameraAngleCounts[i];
+          }
+        }
+        let candidates = [];
+        for (let i = 0; i < cameraAngles.length; i++) {
+          if (i === cameraAngleIndex) continue;
+          if (cameraAngleCounts[i] === minCount) {
+            candidates.push(i);
+          }
+        }
+        let newIndex = candidates[Math.floor(Math.random() * candidates.length)];
+        cameraAngleIndex = newIndex;
+        cameraAngleCounts[newIndex]++;
+        cameraAngleOffset = cameraAngles[newIndex];
+        startAutoSwitchTimer();
+      }
+      
+      function onTap(event) {
+        let clientX = event.changedTouches ? event.changedTouches[0].clientX : event.clientX;
+        const w = window.innerWidth;
+        if (clientX < w / 2) {
+          cameraAngleIndex = (cameraAngleIndex - 1 + cameraAngles.length) % cameraAngles.length;
+        } else {
+          cameraAngleIndex = (cameraAngleIndex + 1) % cameraAngles.length;
+        }
+        cameraAngleCounts[cameraAngleIndex]++;
+        cameraAngleOffset = cameraAngles[cameraAngleIndex];
+        startAutoSwitchTimer();
+      }
+      window.addEventListener("click", onTap, false);
+      window.addEventListener("touchend", onTap, false);
+      
+      startAutoSwitchTimer();
+      
+      let startTimeAnim = null;
+      function animate(timestamp) {
+        if (!startTimeAnim) startTimeAnim = timestamp;
+        let elapsed = (timestamp - startTimeAnim) / 1000;
+        const pos = getCyclePosition(elapsed);
+        const tangent = getCycleTangent(elapsed);
+        planeGroup.position.copy(pos);
+        planeGroup.quaternion.setFromUnitVectors(new THREE.Vector3(1, 0, 0), tangent);
+        
+        const tangentH = new THREE.Vector3(tangent.x, 0, tangent.z).normalize();
+        let cameraOffsetVec = tangentH.multiplyScalar(-15);
+        cameraOffsetVec.applyAxisAngle(new THREE.Vector3(0, 1, 0), cameraAngleOffset);
+        cameraOffsetVec.y += 10;
+        camera.position.copy(pos).add(cameraOffsetVec);
+        camera.lookAt(pos);
+        
+        renderer.render(scene, camera);
+        requestAnimationFrame(animate);
+      }
+      requestAnimationFrame(animate);
+      
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>
