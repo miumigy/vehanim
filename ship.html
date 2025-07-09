@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Local Wave-Propagation on a Water Surface</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <style>
+    body   { margin: 0; overflow: hidden; background-color: #222; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <!-- ------------------------------------------------------------------
+       three.js
+  ------------------------------------------------------------------ -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+  <!-- ------------------------------------------------------------------
+       Simplex-noise helper (creates global `noise`)
+  ------------------------------------------------------------------ -->
+  <script>
+    (function (g) {
+      const F2 = 0.5 * (Math.sqrt(3) - 1);
+      const G2 = (3 - Math.sqrt(3)) / 6;
+
+      const grad3 = [
+        [ 1, 1,0], [-1, 1,0], [ 1,-1,0], [-1,-1,0],
+        [ 1, 0,1], [-1, 0,1], [ 1, 0,-1],[-1, 0,-1],
+        [ 0, 1,1], [ 0,-1,1], [ 0, 1,-1],[ 0,-1,-1]
+      ];
+
+      const p = Array.from({ length: 256 }, () => Math.floor(Math.random() * 256));
+      const perm  = new Array(512);
+      const gradP = new Array(512);
+      for (let i = 0; i < 512; i++) {
+        perm[i]  = p[i & 255];
+        gradP[i] = grad3[perm[i] % 12];
+      }
+
+      g.noise = {
+        simplex2(xin, yin) {
+          let n0, n1, n2;
+
+          const s = (xin + yin) * F2;
+          const i = Math.floor(xin + s);
+          const j = Math.floor(yin + s);
+          const t = (i + j) * G2;
+          const X0 = i - t, Y0 = j - t;
+          const x0 = xin - X0, y0 = yin - Y0;
+
+          const [i1, j1] = x0 > y0 ? [1, 0] : [0, 1];
+          const x1 = x0 - i1 + G2, y1 = y0 - j1 + G2;
+          const x2 = x0 - 1  + 2 * G2, y2 = y0 - 1 + 2 * G2;
+
+          const ii = i & 255, jj = j & 255;
+          const gi0 = gradP[ii       + perm[jj      ]];
+          const gi1 = gradP[ii + i1  + perm[jj + j1]];
+          const gi2 = gradP[ii + 1   + perm[jj + 1 ]];
+
+          const t0 = 0.5 - x0 * x0 - y0 * y0;
+          n0 = t0 < 0 ? 0 : (t0 ** 4) * (gi0[0] * x0 + gi0[1] * y0);
+
+          const t1 = 0.5 - x1 * x1 - y1 * y1;
+          n1 = t1 < 0 ? 0 : (t1 ** 4) * (gi1[0] * x1 + gi1[1] * y1);
+
+          const t2 = 0.5 - x2 * x2 - y2 * y2;
+          n2 = t2 < 0 ? 0 : (t2 ** 4) * (gi2[0] * x2 + gi2[1] * y2);
+
+          return 70 * (n0 + n1 + n2);
+        }
+      };
+    })(this);
+  </script>
+
+  <!-- ------------------------------------------------------------------
+       Main simulation
+  ------------------------------------------------------------------ -->
+  <script>
+    /* === 1.  Helper utilities (declared FIRST, so no TDZ) ============= */
+    const rand    = (min, max) => Math.random() * (max - min) + min;
+    const lerp    = (a, b, t)  => a + (b - a) * t;
+
+    /* Wave base */
+    function baseWave(x, z, t) {
+      const n1 = noise.simplex2(x * 0.005 + t * 0.10, z * 0.005 + t * 0.10);
+      const n2 = noise.simplex2(x * 0.020 - t * 0.30, z * 0.020 - t * 0.30);
+      return n1 * 8 + n2 * 2;
+    }
+
+    /* Ripple helpers */
+    function rippleFalloff(dist, prog, margin) {
+      const d = Math.abs(dist - prog);
+      return d > margin / 2 ? 0 : 1 - d / (margin / 2);
+    }
+
+    /* Modify only the top face of a box */
+    function scaleTopFace(mesh, s) {
+      const posArr = mesh.geometry.attributes.position.array;
+      const topY   = mesh.geometry.parameters.height / 2;
+      for (let i = 0; i < posArr.length; i += 3) {
+        if (Math.abs(posArr[i + 1] - topY) < 1e-4) {
+          posArr[i]     *= s;
+          posArr[i + 2] *= s;
+        }
+      }
+      mesh.geometry.attributes.position.needsUpdate = true;
+    }
+
+    /* Simple boat model */
+    function createBoat() {
+      const g = new THREE.Group();
+
+      const hull = new THREE.Mesh(
+        new THREE.BoxGeometry(20, 5, 50),
+        new THREE.MeshPhongMaterial({ color: 0x333333 })
+      );
+      scaleTopFace(hull, 1.1);
+      g.add(hull);
+
+      const makeBox = (w, h, d, y, col) => {
+        const m = new THREE.Mesh(
+          new THREE.BoxGeometry(w, h, d),
+          new THREE.MeshPhongMaterial({ color: col })
+        );
+        m.position.y = y;
+        g.add(m);
+        return m;
+      };
+      makeBox(15, 3.75, 37.5,  4.375, 0xffffff);
+      makeBox(10, 3.75, 25,    8.125, 0xffffff);
+      makeBox( 5, 2.81, 12.5, 11.406, 0x333333);
+      makeBox( 2.5,1.875,6.25,13.75,  0xffffff);
+
+      const plate1 = new THREE.Mesh(
+        new THREE.BoxGeometry(16, 4, 40),
+        new THREE.MeshPhongMaterial({ color: 0x333333 })
+      );
+      plate1.position.y = -2.5 - 2;
+      scaleTopFace(plate1, 1.1);
+      g.add(plate1);
+
+      const plate2 = new THREE.Mesh(
+        new THREE.BoxGeometry(12.8, 3, 32),
+        new THREE.MeshPhongMaterial({ color: 0x333333 })
+      );
+      plate2.position.y = -2.5 - 4 - 1.5;
+      scaleTopFace(plate2, 1.1);
+      g.add(plate2);
+
+      return g;
+    }
+
+    /* === 2.  Globals =================================================== */
+    let scene, camera, renderer;
+    let plane, boatGroup;
+    let originalPos;            // Float32Array
+    let clock;
+
+    const ripples = [];
+    const rippleSpeed    = 75;
+    const rippleMargin   = 400;
+    const rippleDuration = 3;
+    const maxRippleAmp   = 40;
+
+    let currentBoatY       = 0;
+    let nextAutoRippleTime = 0;
+
+    /* === 3.  Init ====================================================== */
+    init();
+    animate();
+
+    window.addEventListener('resize', onResize, false);
+    window.addEventListener('click',  addRippleFromPointer);
+    window.addEventListener('touchstart', e => addRippleFromPointer(e.touches[0]));
+
+    function init() {
+      scene = new THREE.Scene();
+
+      /* Camera */
+      camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 5000);
+      camera.position.set(0, 80, 200);
+      camera.lookAt(0, 0, 0);
+
+      /* Renderer */
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      document.body.appendChild(renderer.domElement);
+
+      /* Lights */
+      scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+      const dl = new THREE.DirectionalLight(0xffffff, 0.8);
+      dl.position.set(50, 50, 50);
+      dl.castShadow = true;
+      dl.shadow.mapSize.set(2048, 2048);
+      dl.shadow.camera.left = dl.shadow.camera.bottom = -500;
+      dl.shadow.camera.right = dl.shadow.camera.top  =  500;
+      scene.add(dl);
+
+      /* Water plane */
+      const geom = new THREE.PlaneBufferGeometry(1500, 1000, 200, 200);
+      geom.rotateX(-Math.PI / 2);
+      const mat  = new THREE.MeshPhongMaterial({ color: 0x888888, side: THREE.DoubleSide });
+      plane = new THREE.Mesh(geom, mat);
+      plane.receiveShadow = true;
+      scene.add(plane);
+      originalPos = new Float32Array(plane.geometry.attributes.position.array);
+
+      /* Boat */
+      boatGroup = new THREE.Group();
+      boatGroup.add(createBoat());
+      boatGroup.traverse(m => { if (m.isMesh) m.castShadow = true; });
+      scene.add(boatGroup);
+
+      /* Timing */
+      clock = new THREE.Clock();
+      const t0 = clock.getElapsedTime();
+      currentBoatY = baseWave(0, 0, t0) + 2.5;
+      nextAutoRippleTime = t0 + 5;
+
+      onResize();
+    }
+
+    /* === 4.  Resize ==================================================== */
+    function onResize() {
+      const w = window.innerWidth, h = window.innerHeight;
+      camera.aspect = w / h;
+      if (w < h) { camera.fov = 80; boatGroup.scale.set(0.8,0.8,0.8); }
+      else       { camera.fov = 50; boatGroup.scale.set(1,1,1); }
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    }
+
+    /* === 5.  Ripple logic ============================================= */
+    function addRipple(x, z, startTime, amp) {
+      ripples.push({ x, z, start: startTime, amp });
+    }
+
+    function addRippleFromPointer(evt) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      const mx = ((evt.clientX - rect.left)  / rect.width ) * 2 - 1;
+      const my = (-(evt.clientY - rect.top) / rect.height) * 2 + 1;
+
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera({ x: mx, y: my }, camera);
+      const hit = ray.intersectObject(plane)[0];
+      if (hit) addRipple(hit.point.x, hit.point.z, clock.getElapsedTime(), 40);
+    }
+
+    function rippleValue(x, z, t) {
+      let sum = 0;
+      for (const r of ripples) {
+        const dt = t - r.start;
+        const norm = dt / rippleDuration;
+        const prog = rippleSpeed * dt;
+
+        const dx = x - r.x, dz = z - r.z;
+        const dist = Math.hypot(dx, dz);
+        const spatial = rippleFalloff(dist, prog, rippleMargin);
+
+        let temporal = 0;
+        if (norm <= 1) temporal = r.amp * (1 - Math.cos(norm * Math.PI)) / 2;
+        else if (norm <= 2) temporal = r.amp * (2 - norm);
+
+        /* Edge fade */
+        const fx = Math.max(1 - (Math.abs(x) / 750) ** 2, 0);
+        const fz = Math.max(1 - (Math.abs(z) / 500) ** 2, 0);
+
+        sum += temporal * spatial * fx * fz;
+      }
+      return Math.min(sum, maxRippleAmp);
+    }
+
+    /* === 6.  Animation loop =========================================== */
+    function animate() {
+      requestAnimationFrame(animate);
+      const t = clock.getElapsedTime();
+
+      /* Auto ripple every 5 s */
+      if (t > nextAutoRippleTime) {
+        addRipple(rand(-750, 750), rand(-500, 500), t, 40);
+        nextAutoRippleTime = t + 5;
+      }
+      /* Remove finished ripples */
+      for (let i = ripples.length - 1; i >= 0; i--)
+        if ((t - ripples[i].start) / rippleDuration > 2) ripples.splice(i, 1);
+
+      updateWater(t);
+      updateBoat(t);
+
+      renderer.render(scene, camera);
+    }
+
+    function updateWater(t) {
+      const pos = plane.geometry.attributes.position.array;
+      for (let i = 0; i < pos.length; i += 3) {
+        const ox = originalPos[i], oz = originalPos[i + 2];
+        pos[i + 1] = baseWave(ox, oz, t) + rippleValue(ox, oz, t);
+      }
+      plane.geometry.attributes.position.needsUpdate = true;
+      plane.geometry.computeVertexNormals();
+    }
+
+    function updateBoat(t) {
+      const p = boatGroup.position;
+      const h = baseWave(p.x, p.z, t) + rippleValue(p.x, p.z, t) + 2.5;
+      currentBoatY = lerp(currentBoatY, h, 0.1);
+      boatGroup.position.y = currentBoatY;
+
+      /* Slope for rocking */
+      const δ = 1;
+      const dhx = baseWave(p.x + δ, p.z, t) - baseWave(p.x - δ, p.z, t);
+      const dhz = baseWave(p.x, p.z + δ, t) - baseWave(p.x, p.z - δ, t);
+      boatGroup.rotation.z =  Math.atan(dhx / (2 * δ));
+      boatGroup.rotation.x = -Math.atan(dhz / (2 * δ));
+    }
+  </script>
+</body>
+</html>
