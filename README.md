@@ -20,15 +20,15 @@ All simulations are implemented in **single-file HTML** format and run fully on 
 ## 📁 Repository Structure
 
 /vehanim
-
+|
 ├── index.html         # Top page to select a simulator
-
+|
 ├── train.html         # Train animation
-
+|
 ├── ship.html          # Ship + wave animation
-
+|
 ├── airplane.html      # Bird-style flight animation
-
+|
 └── README.md
 
 ---
