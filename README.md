@@ -21,7 +21,7 @@ All simulations are implemented in **single-file HTML** format and run fully on 
 
 /vehanim
 
-├── index.html         # Top page to select a simulator
+├── index.html         # Top page to select a animation
 
 ├── train.html         # Train animation
 
