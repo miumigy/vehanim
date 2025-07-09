@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>3-D Train Simulation</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <style>
+    body   { margin: 0; overflow: hidden; background:#000; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <!-- Three.js r128 -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+  <script>
+  /* =========================================================
+     1.  Global variables – declared first (no TDZ risk)
+  ========================================================= */
+  let scene, camera, renderer, train;
+
+  /* Train speed & state */
+  let trainSpeed = 0.6;
+  const MAX_SPEED = 0.9;
+  const MIN_SPEED = 0.01;
+  const ACCEL     = 0.003;
+  /* simState: "normal" | "decelerating" | "stopped" | "accelerating" */
+  let simState = "normal";
+
+  /* Station / track progression */
+  const STATION_SPACING = 2000;
+  let nextStationZ   = 0;
+  let trainStopPos   = nextStationZ + 20;
+  let decelStartPos  = trainStopPos + 90;
+
+  /* Camera */
+  const baseCamOffset = new THREE.Vector3(0, 35, 75);
+  let   camAngle  = 0;               // degrees
+  let   camOffset = baseCamOffset.clone();
+
+  /* Camera-angle bookkeeping */
+  const CAM_ANGLES   = [0, 45, -45, 90, -90, 135, -135, 180];
+  const camPickCount = Object.fromEntries(CAM_ANGLES.map(a => [a, a === 0 ? 1 : 0]));
+
+  /* Idle-timer: auto-switch camera after 10 s without clicks */
+  let idleTimer;
+
+  /* Track / platform registries */
+  const stationPlatforms = {};           // zKey ⇒ { left,right }
+  const railSegments     = [];           // { left,right,sleepers,zStart,zEnd }
+  let   currentRailEndZ;                 // most-negative z built so far
+
+  /* =========================================================
+     2.  HOISTED helper functions (defined with `function`)
+         — they can be used anywhere below
+  ========================================================= */
+  function updateCamOffset() {
+    camOffset.copy(baseCamOffset)
+             .applyAxisAngle(new THREE.Vector3(0,1,0),
+                             THREE.MathUtils.degToRad(camAngle));
+  }
+
+  function resetIdle() {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(autoSwitchCamera, 10000);
+  }
+
+  function autoSwitchCamera() {
+    const other = CAM_ANGLES.filter(a => a !== camAngle);
+    const min   = Math.min(...other.map(a => camPickCount[a]));
+    const pool  = other.filter(a => camPickCount[a] === min);
+    camAngle    = pool[Math.floor(Math.random() * pool.length)];
+    camPickCount[camAngle]++;
+    updateCamOffset();
+    resetIdle();
+  }
+
+  /* Smooth, distance-aware deceleration */
+  function softDecel() {
+    const dist = train.position.z - trainStopPos;
+    let f = dist < 20 ? 3 : dist < 40 ? 2 : 1;
+
+    if      (trainSpeed >= 0.5)  return 0.005 * f;
+    else if (trainSpeed >= 0.3)  return 0.003 * f;
+    else if (trainSpeed >= 0.15) return 0.001 * f;
+    return 0.0003 * f;
+  }
+
+  /* Track-segment builder: zStart < zEnd */
+  function createRailSegment(zStart, zEnd) {
+    const segLen   = zEnd - zStart;
+    const railGeom = new THREE.BoxGeometry(0.2, 0.2, segLen);
+    const railMat  = new THREE.MeshStandardMaterial({ color: 0x808080 });
+
+    function makeRail(x) {
+      const rail = new THREE.Mesh(railGeom, railMat);
+      rail.position.set(x, -1, zStart + segLen / 2);
+      rail.frustumCulled = false;
+      scene.add(rail);
+      return rail;
+    }
+    const leftRail  = makeRail(-2);
+    const rightRail = makeRail( 2);
+
+    /* Sleepers (instanced) */
+    const sleeperGeom = new THREE.BoxGeometry(6, 0.3, 1);
+    const sleeperMat  = railMat;
+    const count = Math.floor(segLen / 5) + 1;
+    const sleepers = new THREE.InstancedMesh(sleeperGeom, sleeperMat, count);
+
+    const tmp = new THREE.Object3D();
+    let idx = 0;
+    for (let z = zStart; z <= zEnd; z += 5) {
+      tmp.position.set(0, -1.2, z);
+      tmp.updateMatrix();
+      sleepers.setMatrixAt(idx++, tmp.matrix);
+    }
+    scene.add(sleepers);
+
+    railSegments.push({ left: leftRail, right: rightRail,
+                        sleepers, zStart, zEnd });
+  }
+
+  /* Station platforms (both sides) */
+  function createStationPlatform(z) {
+    const h    = 2.5;
+    const geom = new THREE.BoxGeometry(6, h, 56);
+    const mat  = new THREE.MeshBasicMaterial({ color: 0x555555 });
+    const y    = -0.1;
+
+    function makePlat(x) {
+      const m = new THREE.Mesh(geom, mat);
+      m.position.set(x, y, z);
+      m.renderOrder = 10;
+      scene.add(m);
+      return m;
+    }
+    stationPlatforms[z.toFixed(3)] = { left: makePlat(-5), right: makePlat( 5) };
+  }
+  const platformExists = z => stationPlatforms.hasOwnProperty(z.toFixed(3));
+
+  /* ---------------------------------------------------------
+     Resize & click handlers
+  --------------------------------------------------------- */
+  function handleResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+
+    baseCamOffset.set(0, 35, 75);   // reset in case of orientation change
+    updateCamOffset();
+  }
+
+  function handleClick(e) {
+    camAngle += (e.clientX < window.innerWidth / 2) ? -45 : 45;
+    if (camPickCount[camAngle] === undefined) camPickCount[camAngle] = 0;
+    camPickCount[camAngle]++;
+
+    updateCamOffset();
+    resetIdle();
+  }
+
+  /* =========================================================
+     3.  init()  – builds scene
+  ========================================================= */
+  function init() {
+    scene = new THREE.Scene();
+
+    /* Camera */
+    camera = new THREE.PerspectiveCamera(75,
+      window.innerWidth / window.innerHeight, 0.1, 10000);
+    updateCamOffset();
+    camera.position.copy(camOffset);
+
+    /* Renderer */
+    renderer = new THREE.WebGLRenderer({ antialias:true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    document.body.appendChild(renderer.domElement);
+
+    /* Lights */
+    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+    const dl = new THREE.DirectionalLight(0xffffff, 1);
+    dl.position.set(0,10,10);
+    scene.add(dl);
+
+    /* Initial rails  (z = -6000 … 2000) */
+    const initStart = -6000, initEnd = 2000;
+    for (let z = initStart; z < initEnd; z += STATION_SPACING)
+      createRailSegment(z, z + STATION_SPACING);
+    currentRailEndZ = initStart;
+
+    /* First four stations (current & three ahead) */
+    for (let i = 0; i <= 3; i++)
+      createStationPlatform(nextStationZ - i * STATION_SPACING);
+
+    /* ------------- Train model (3 cars + couplers) ------------- */
+    train = new THREE.Group();
+
+    const matLower = new THREE.MeshStandardMaterial({ color: 0x333333 });
+    const matUpper = new THREE.MeshStandardMaterial({ color: 0xffffff });
+    const matRoof  = new THREE.MeshStandardMaterial({ color: 0x888888 });
+
+    const carGeom  = new THREE.BoxGeometry(4, 2, 16);
+    const winGeom  = new THREE.PlaneGeometry(3, 1.6);
+    const winMat   = new THREE.MeshBasicMaterial({ color:0x000000,side:THREE.DoubleSide });
+
+    for (let i = 0; i < 3; i++) {
+      const car = new THREE.Mesh(carGeom, matLower);
+      car.position.z = i * -20;
+
+      /* Middle layer with windows */
+      const mid = new THREE.Mesh(new THREE.BoxGeometry(4,4,16), matUpper);
+      mid.position.y = 3;
+
+      /* left / right windows */
+      for (let side of [-1,1])
+        for (let j = 0; j < 3; j++) {
+          const w = new THREE.Mesh(winGeom, winMat);
+          w.position.set(2.01*side, 0.6, -8 + 4*(j+1));
+          w.rotation.y = side > 0 ?  Math.PI/2 : -Math.PI/2;
+          mid.add(w);
+        }
+      /* front / back window */
+      ["front","back"].forEach((_,idx)=>{
+        const w = new THREE.Mesh(winGeom, winMat);
+        w.position.set(0,0.6, idx===0 ? -8.01 : 8.01);
+        w.rotation.y = idx===0 ? Math.PI : 0;
+        mid.add(w);
+      });
+      car.add(mid);
+
+      /* roof layer */
+      const roof = new THREE.Mesh(new THREE.BoxGeometry(2.5,0.67,16), matRoof);
+      roof.position.y = 5 + 0.67/2;
+      car.add(roof);
+
+      train.add(car);
+    }
+
+    /* Couplers */
+    const coupGeom = new THREE.BoxGeometry(0.3,0.3,5);
+    const coupMat  = new THREE.MeshStandardMaterial({ color:0 });
+    const c1 = new THREE.Mesh(coupGeom,coupMat); c1.position.set(0,0,-10);
+    const c2 = new THREE.Mesh(coupGeom,coupMat); c2.position.set(0,0,-30);
+    train.add(c1,c2);
+
+    train.position.z = trainStopPos;
+    scene.add(train);
+
+    /* Events */
+    renderer.domElement.addEventListener('click',  handleClick, false);
+    window.addEventListener('resize',              handleResize, false);
+  }
+
+  /* =========================================================
+     4.  Main animation loop
+  ========================================================= */
+  function animate() {
+    requestAnimationFrame(animate);
+
+    /* -- Train kinematics -- */
+    if (simState === "normal") {
+      if (train.position.z <= decelStartPos) simState = "decelerating";
+      train.position.z -= trainSpeed;
+
+    } else if (simState === "decelerating") {
+      const remaining = train.position.z - trainStopPos;
+      const dec = softDecel();
+
+      if (remaining < trainSpeed && remaining > MIN_SPEED) trainSpeed = remaining;
+      else trainSpeed = Math.max(trainSpeed - dec, MIN_SPEED);
+
+      train.position.z -= trainSpeed;
+
+      if (train.position.z <= trainStopPos) {
+        train.position.z = trainStopPos;
+        trainSpeed = 0;
+
+        const scheduleNext = () => {
+          nextStationZ -= STATION_SPACING;
+          trainStopPos   = nextStationZ + 20;
+          decelStartPos  = trainStopPos + 90;
+
+          for (let i = 0; i <= 3; i++) {
+            const z = nextStationZ - i * STATION_SPACING;
+            if (!platformExists(z)) createStationPlatform(z);
+          }
+          simState = "accelerating";
+        };
+
+        if (nextStationZ === 0) scheduleNext();
+        else {
+          simState = "stopped";
+          setTimeout(scheduleNext, 5000);
+        }
+      }
+
+    } else if (simState === "accelerating") {
+      trainSpeed = Math.min(trainSpeed + ACCEL, MAX_SPEED);
+      train.position.z -= trainSpeed;
+      if (trainSpeed === MAX_SPEED) simState = "normal";
+    }
+
+    /* Ensure next-three stations are present */
+    for (let i = 0; i <= 3; i++) {
+      const z = nextStationZ - i * STATION_SPACING;
+      if (!platformExists(z)) createStationPlatform(z);
+    }
+
+    /* Extend rails ahead when close to end */
+    if (train.position.z <= currentRailEndZ + 1500) {
+      createRailSegment(currentRailEndZ - STATION_SPACING, currentRailEndZ);
+      currentRailEndZ -= STATION_SPACING;
+    }
+
+    /* Cull far-behind objects */
+    const REMOVAL_MARGIN = 4000;
+    const threshold = train.position.z + REMOVAL_MARGIN;
+
+    for (let i = railSegments.length - 1; i >= 0; i--) {
+      const s = railSegments[i];
+      if (s.zEnd > threshold) {
+        scene.remove(s.left, s.right, s.sleepers);
+        railSegments.splice(i,1);
+      }
+    }
+    for (const key in stationPlatforms) {
+      const p = stationPlatforms[key];
+      if (p.left.position.z > threshold) {
+        scene.remove(p.left, p.right);
+        delete stationPlatforms[key];
+      }
+    }
+
+    /* Camera follow */
+    camera.position.copy(train.position).add(camOffset);
+
+    const center = new THREE.Box3().setFromObject(train).getCenter(new THREE.Vector3());
+    camera.lookAt(center);
+
+    renderer.render(scene, camera);
+  }
+
+  /* =========================================================
+     5.  Bootstrap
+  ========================================================= */
+  init();
+  animate();
+  resetIdle();         // start idle-camera timer
+  </script>
+</body>
+</html>
