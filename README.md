@@ -1,11 +1,11 @@
 # Vehicle Animation Simulator
 
-This project is a web-based hub for exploring 3D simulations of various vehicles using [Three.js](https://threejs.org/).  
-Each simulation features unique visual effects and physical behaviors.
+This project is a web-based 3D animation of some vehicles using [Three.js](https://threejs.org/).  
+Each animation features unique visual effects and physical behaviors.
 
 ---
 
-## 🔗 Simulations Included
+## 🔗 Animations Included
 
 | Vehicle | Description |
 |--------|-------------|
@@ -13,7 +13,7 @@ Each simulation features unique visual effects and physical behaviors.
 | 🚢 **Ship** | A boat floating realistically on procedurally generated waves using Perlin noise. |
 | ✈️ **Airplane** | A flying bird-like aircraft flapping its wings while moving through the sky. |
 
-All simulations are implemented in **single-file HTML** format and run fully on the browser (no server required).
+All Animations are implemented in **single-file HTML** format and run fully on the browser (no server required).
 
 ---
 
