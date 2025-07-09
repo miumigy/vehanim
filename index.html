@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vehicle Animation Hub</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background: linear-gradient(to bottom, #222, #111);
+      color: white;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 20px;
+    }
+    h1 {
+      font-size: 2em;
+      margin-bottom: 1em;
+      text-align: center;
+    }
+    .menu {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      width: 100%;
+      max-width: 400px;
+    }
+    .menu a {
+      display: block;
+      text-align: center;
+      background-color: #444;
+      padding: 16px;
+      border-radius: 8px;
+      text-decoration: none;
+      color: white;
+      font-size: 1.2em;
+      transition: background-color 0.3s;
+    }
+    .menu a:hover {
+      background-color: #666;
+    }
+    @media (min-width: 600px) {
+      .menu {
+        flex-direction: row;
+        justify-content: center;
+      }
+    }
+  </style>
+</head>
+<body>
+  <h1>Select a Vehicle Animation</h1>
+  <div class="menu">
+    <a href="train.html">🚆<br>Train</a>
+    <a href="ship.html">🚢<br>Ship & Wave</a>
+    <a href="air.html">✈️<br>Airplane</a>
+  </div>
+</body>
+</html>
